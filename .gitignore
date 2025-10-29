@@ -32,6 +32,8 @@ wheels/
 # IDE
 .idea/
 .vscode/
+.claude/
+.grok/
 *.swp
 *.swo
 *~

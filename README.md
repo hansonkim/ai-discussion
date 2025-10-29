@@ -129,6 +129,47 @@ rm .ai_models_cache.json
 python3 ai_debate.py
 ```
 
+## 프로젝트 구조
+
+### 📦 모듈화된 아키텍처 (v2.0)
+
+프로젝트는 기능별로 명확하게 분리된 모듈 구조로 설계되었습니다:
+
+```
+ai-discussion/
+├── ai_debate/                  # 메인 패키지
+│   ├── models/                 # 데이터 모델
+│   │   ├── ai_model.py        # AIModel 데이터클래스
+│   │   └── debate_setup.py    # Stance, DebateSetup
+│   ├── services/              # 비즈니스 로직
+│   │   ├── ai_client.py       # AI CLI 호출
+│   │   ├── model_manager.py   # 모델 가용성 관리
+│   │   ├── prompt_generator.py # 프롬프트 생성
+│   │   └── debate_engine.py   # 토론 진행 엔진
+│   ├── io/                    # 입출력 처리
+│   │   ├── cache_manager.py   # 캐시 관리
+│   │   └── file_manager.py    # 마크다운 파일 관리
+│   ├── ui/                    # 사용자 인터페이스
+│   │   ├── console.py         # 콘솔 출력
+│   │   └── input_handler.py   # 사용자 입력 처리
+│   ├── config/                # 설정 및 상수
+│   │   └── constants.py       # 전역 상수 정의
+│   └── exceptions.py          # 커스텀 예외
+├── main.py                    # 진입점
+├── ai_debate.py              # 레거시 파일 (백업용)
+└── README.md
+
+총 18개 모듈, 파일당 평균 ~100줄
+```
+
+### 아키텍처 원칙
+
+- **단일 책임 원칙 (SRP)**: 각 모듈은 하나의 명확한 책임만 가짐
+- **의존성 주입 (DI)**: main.py에서 모든 의존성 조율
+- **계층화 아키텍처**: Models → Services → UI/IO
+- **타입 안전성**: 모든 public API에 타입 힌트 적용
+- **확장 가능성**: 새로운 AI 모델이나 기능 추가 용이
+
 ## 필수 요구사항
 
 ### Python 패키지
@@ -159,6 +200,10 @@ claude --version
 ### 기본 사용
 
 ```bash
+# 새로운 모듈화 버전 (권장)
+python3 main.py
+
+# 또는 레거시 버전
 python3 ai_debate.py
 ```
 
@@ -173,11 +218,11 @@ python3 ai_debate.py
 ### 명령줄에서 주제 지정
 
 ```bash
-python3 ai_debate.py "원격 근무 의무화"
+python3 main.py "원격 근무 의무화"
 ```
 
 ```bash
-python3 ai_debate.py "AI 규제 강화의 필요성"
+python3 main.py "AI 규제 강화의 필요성"
 ```
 
 ## 토론 진행 과정
