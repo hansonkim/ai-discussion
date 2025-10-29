@@ -1,7 +1,8 @@
 """AI 모델 관리 서비스"""
 
 import subprocess
-from typing import Dict
+from typing import Dict, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from ai_debate.models.ai_model import AIModel
 from ai_debate.io.cache_manager import CacheManager
 from ai_debate.config.constants import ALL_AI_MODELS, MODEL_CHECK_TIMEOUT
@@ -129,23 +130,35 @@ class ModelManager:
                 else:
                     print("⚠️  캐시된 모델이 유효하지 않습니다. 재확인합니다...\n")
 
-        # AI 모델 가용성 확인
-        print("🔍 AI 모델 가용성 확인 중...")
+        # AI 모델 가용성 확인 (병렬 처리)
+        print("🔍 AI 모델 가용성 확인 중... (병렬 처리)")
         print("-" * 60)
 
         # 초기화 (이전 데이터 제거)
         self.available_models.clear()
         available_keys = []
 
-        for model_key, model in ALL_AI_MODELS.items():
-            print(f"  - {model.display_name}...", end=" ", flush=True)
+        # 병렬로 모든 모델 확인
+        with ThreadPoolExecutor(max_workers=len(ALL_AI_MODELS)) as executor:
+            # 모든 모델 확인 작업 제출
+            future_to_model = {
+                executor.submit(self.check_model_availability, key, model): (key, model)
+                for key, model in ALL_AI_MODELS.items()
+            }
 
-            if self.check_model_availability(model_key, model):
-                self.available_models[model_key] = model
-                available_keys.append(model_key)
-                print("✅ 사용 가능")
-            else:
-                print("❌ 사용 불가")
+            # 완료되는 대로 결과 처리
+            for future in as_completed(future_to_model):
+                model_key, model = future_to_model[future]
+                try:
+                    is_available = future.result()
+                    if is_available:
+                        self.available_models[model_key] = model
+                        available_keys.append(model_key)
+                        print(f"  ✅ {model.display_name} - 사용 가능")
+                    else:
+                        print(f"  ❌ {model.display_name} - 사용 불가")
+                except Exception as e:
+                    print(f"  ❌ {model.display_name} - 확인 실패: {e}")
 
         print("-" * 60)
 
