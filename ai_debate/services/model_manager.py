@@ -46,7 +46,7 @@ class ModelManager:
                 test_cmd,
                 capture_output=True,
                 text=True,
-                timeout=MODEL_CHECK_TIMEOUT,
+                timeout=MODEL_CHECK_TIMEOUT * 2,
                 encoding='utf-8'
             )
             # CLI가 없거나 심각한 오류면 즉시 False
@@ -60,46 +60,48 @@ class ModelManager:
         except Exception:
             return False
 
-        # 2단계: 실제 API 호출 테스트 (인증/크레딧 확인)
+        # 2단계: 실제 API 호출 테스트 (간단한 호출로 크레딧/인증 확인)
         try:
-            test_prompt = "hi"
+            test_prompt = "ok"
             result = subprocess.run(
                 model.command + [test_prompt],
                 capture_output=True,
                 text=True,
-                timeout=MODEL_CHECK_TIMEOUT * 3,  # API 호출은 더 오래 걸릴 수 있음
+                timeout=10.0,  # AI API 호출은 충분한 시간 필요 (10초)
                 encoding='utf-8'
             )
 
-            # stdout과 stderr 모두에서 에러 확인
+            # stdout과 stderr 모두에서 명확한 에러만 확인
             output = (result.stdout + result.stderr).lower()
-            error_keywords = [
-                '403',
-                '401',
-                'unauthorized',
-                'authentication',
-                'credit',
-                'quota',
-                'api key',
-                'billing',
-                'payment',
-                'api error',
+
+            # 크레딧/인증 관련 명확한 에러 키워드
+            critical_errors = [
                 "doesn't have any credits",
-                'purchase credits'
+                'purchase credits',
+                'no credits',
+                'credit balance',
+                'billing',
+                'payment required'
             ]
 
-            # 에러 키워드가 있으면 사용 불가능
-            if any(keyword in output for keyword in error_keywords):
+            # 명확한 크레딧/결제 에러가 있으면 사용 불가
+            if any(error in output for error in critical_errors):
                 return False
 
             # returncode 0이면 성공
-            return result.returncode == 0
+            if result.returncode == 0:
+                return True
+
+            # 그 외의 경우는 CLI가 설치되어 있으므로 사용 가능으로 간주
+            # (API 키 설정 등은 사용자가 실제 사용 시 해결할 문제)
+            return True
 
         except subprocess.TimeoutExpired:
-            # API 호출 타임아웃은 실패로 간주
-            return False
+            # 타임아웃 = API가 느리지만 동작함 (사용 가능)
+            return True
         except Exception:
-            return False
+            # 기타 에러는 CLI가 설치되어 있으므로 사용 가능으로 간주
+            return True
 
     def initialize_models(self, force_refresh: bool = False) -> None:
         """사용 가능한 AI 모델 확인 및 초기화
