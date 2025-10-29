@@ -1,6 +1,9 @@
 # 토론 로그
 debate_log_*.txt
 
+# AI 모델 캐시
+.ai_models_cache.json
+
 # Python
 __pycache__/
 *.py[cod]

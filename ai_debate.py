@@ -14,11 +14,12 @@ AI 토론 시스템
 
 import json
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 import time
 import subprocess
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -27,31 +28,185 @@ class AIModel:
     name: str           # 표시 이름 (예: "Claude")
     command: List[str]  # CLI 명령어 (예: ["claude", "code", "-p"])
     display_name: str   # 화면 표시용 전체 이름 (예: "Claude (Anthropic)")
+    test_command: Optional[List[str]] = None  # 가용성 테스트용 명령어
 
 
-# 지원하는 AI 모델 정의
-AVAILABLE_AI_MODELS = {
+# 지원하는 AI 모델 정의 (초기 전체 목록)
+ALL_AI_MODELS = {
     "claude": AIModel(
         name="Claude",
         command="claude -p".split(),
-        display_name="Claude (Anthropic)"
+        display_name="Claude (Anthropic)",
+        test_command=["claude", "--version"]
     ),
     "openai": AIModel(
         name="OpenAI",
         command="codex exec --skip-git-repo-check".split(),
-        display_name="OpenAI GPT (Codex)"
+        display_name="OpenAI GPT (Codex)",
+        test_command=["codex", "--version"]
     ),
     "gemini": AIModel(
         name="Gemini",
         command="gemini -p".split(),
-        display_name="Gemini (Google)"
+        display_name="Gemini (Google)",
+        test_command=["gemini", "--version"]
     ),
     "grok": AIModel(
         name="Grok",
         command="grok -p".split(),
-        display_name="Grok (xAI)"
+        display_name="Grok (xAI)",
+        test_command=["grok", "--version"]
     )
 }
+
+# 실제 사용 가능한 AI 모델 (프로그램 시작 시 초기화)
+AVAILABLE_AI_MODELS: Dict[str, AIModel] = {}
+
+# 캐시 파일 경로
+CACHE_FILE = Path(".ai_models_cache.json")
+
+
+def check_ai_model_availability(model_key: str, model: AIModel) -> bool:
+    """
+    특정 AI 모델의 CLI가 사용 가능한지 확인
+
+    Args:
+        model_key: 모델 키 (예: "claude")
+        model: AI 모델 정보
+
+    Returns:
+        사용 가능하면 True, 아니면 False
+    """
+    test_cmd = model.test_command or model.command[:1] + ["--version"]
+
+    try:
+        result = subprocess.run(
+            test_cmd,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            encoding='utf-8'
+        )
+        # 명령어가 실행되고 심각한 오류가 없으면 사용 가능
+        return result.returncode in [0, 1]  # 일부 CLI는 --version이 없어 1 반환
+    except FileNotFoundError:
+        return False
+    except subprocess.TimeoutExpired:
+        # 타임아웃은 실행은 되지만 응답이 느린 경우
+        return True
+    except Exception:
+        return False
+
+
+def load_cached_models() -> Optional[List[str]]:
+    """
+    캐시 파일에서 사용 가능한 모델 목록 로드
+
+    Returns:
+        캐시된 모델 키 리스트 또는 None (캐시 없음)
+    """
+    if not CACHE_FILE.exists():
+        return None
+
+    try:
+        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get('available_models', [])
+    except Exception as e:
+        print(f"⚠️  캐시 파일 읽기 실패: {e}")
+        return None
+
+
+def save_cached_models(available_keys: List[str]):
+    """
+    사용 가능한 모델 목록을 캐시 파일에 저장
+
+    Args:
+        available_keys: 사용 가능한 모델 키 리스트
+    """
+    try:
+        data = {
+            'available_models': available_keys,
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️  캐시 파일 저장 실패: {e}")
+
+
+def initialize_available_models(force_refresh: bool = False):
+    """
+    사용 가능한 AI 모델 확인 및 초기화
+
+    Args:
+        force_refresh: True면 캐시 무시하고 강제로 재확인
+
+    Raises:
+        SystemExit: 사용 가능한 모델이 없을 경우
+    """
+    global AVAILABLE_AI_MODELS
+
+    # 캐시 확인 (force_refresh가 아닐 때만)
+    if not force_refresh:
+        cached_keys = load_cached_models()
+        if cached_keys:
+            print("✅ 캐시된 AI 모델 정보 사용")
+            AVAILABLE_AI_MODELS = {
+                key: ALL_AI_MODELS[key]
+                for key in cached_keys
+                if key in ALL_AI_MODELS
+            }
+            if AVAILABLE_AI_MODELS:
+                print(f"🤖 사용 가능한 AI 모델: {', '.join(m.display_name for m in AVAILABLE_AI_MODELS.values())}\n")
+                return
+            else:
+                print("⚠️  캐시된 모델이 유효하지 않습니다. 재확인합니다...\n")
+
+    # AI 모델 가용성 확인
+    print("🔍 AI 모델 가용성 확인 중...")
+    print("-" * 60)
+
+    # 초기화 (이전 데이터 제거)
+    AVAILABLE_AI_MODELS.clear()
+    available_keys = []
+
+    for model_key, model in ALL_AI_MODELS.items():
+        print(f"  - {model.display_name}...", end=" ", flush=True)
+
+        if check_ai_model_availability(model_key, model):
+            AVAILABLE_AI_MODELS[model_key] = model
+            available_keys.append(model_key)
+            print("✅ 사용 가능")
+        else:
+            print("❌ 사용 불가")
+
+    print("-" * 60)
+
+    # 사용 가능한 모델이 없으면 에러
+    if not AVAILABLE_AI_MODELS:
+        print("\n❌ 사용 가능한 AI 모델이 없습니다!")
+        print("\n다음 중 하나 이상의 AI CLI를 설치해주세요:\n")
+        print("1. Claude (Anthropic)")
+        print("   - 설치: npm install -g @anthropic-ai/claude-cli")
+        print("   - 문서: https://docs.anthropic.com/claude/docs/claude-cli\n")
+        print("2. OpenAI GPT (Codex)")
+        print("   - 설치: npm install -g @openai/codex-cli")
+        print("   - 문서: https://platform.openai.com/docs/codex\n")
+        print("3. Gemini (Google)")
+        print("   - 설치: pip install google-generativeai")
+        print("   - 문서: https://ai.google.dev/docs\n")
+        print("4. Grok (xAI)")
+        print("   - 설치: pip install grok-cli")
+        print("   - 문서: https://x.ai/docs\n")
+        print("💡 캐시를 강제로 갱신하려면 '.ai_models_cache.json' 파일을 삭제하세요.\n")
+        sys.exit(1)
+
+    # 캐시 저장
+    save_cached_models(available_keys)
+
+    print(f"\n✅ {len(AVAILABLE_AI_MODELS)}개의 AI 모델 사용 가능")
+    print(f"🤖 사용 가능한 모델: {', '.join(m.display_name for m in AVAILABLE_AI_MODELS.values())}\n")
 
 
 class AIDebateSystem:
@@ -70,6 +225,7 @@ class AIDebateSystem:
         self.subject_slug = None
         self.char_limit = char_limit
         self.num_rounds = num_rounds
+        self.timestamp = None  # 파일명에 사용할 타임스탬프
 
     def call_ai(self, prompt: str, ai_model: AIModel) -> str:
         """
@@ -147,8 +303,8 @@ class AIDebateSystem:
             except ValueError:
                 print(f"❌ 올바른 숫자를 입력하세요.")
             except KeyboardInterrupt:
-                print("\n\n⚠️  기본값(Claude) 사용")
-                return AVAILABLE_AI_MODELS["claude"]
+                print("\n\n⚠️  기본값 사용")
+                return list(AVAILABLE_AI_MODELS.values())[0]
 
     def generate_filename_keyword(self, topic: str) -> str:
         """
@@ -178,8 +334,9 @@ class AIDebateSystem:
 다른 텍스트 없이 키워드만 답변해주세요."""
 
         try:
-            # 파일명 생성은 Claude 사용 (기본)
-            keyword = self.call_ai(prompt, AVAILABLE_AI_MODELS["claude"])
+            # 파일명 생성은 첫 번째 사용 가능한 모델 사용
+            first_model = list(AVAILABLE_AI_MODELS.values())[0]
+            keyword = self.call_ai(prompt, first_model)
             # 안전하게 파일명으로 사용 가능하도록 정제
             keyword = re.sub(r'[^\w\-]', '', keyword.lower().strip())
             # 연속된 하이픈 제거
@@ -190,77 +347,106 @@ class AIDebateSystem:
             print(f"⚠️  키워드 생성 실패, 기본값 사용: {e}")
             # 실패 시 타임스탬프만 사용
             return "debate"
-        
-    def analyze_topic_and_create_stances(self, topic: str) -> Dict:
+
+    def generate_title_for_position(self, topic: str, position: str) -> str:
         """
-        주제를 분석하고 상반된 두 입장을 생성
-        
+        입장에 기반하여 짧은 제목 생성
+
         Args:
             topic: 토론 주제
-            
+            position: 참여자의 핵심 주장
+
         Returns:
-            토론 설정 정보 (주제, 입장 A, 입장 B)
+            생성된 제목 (2-5 단어)
         """
-        print(f"\n{'='*60}")
-        print(f"📋 주제 분석 중: {topic}")
-        print(f"{'='*60}\n")
-        
-        prompt = f"""다음 주제에 대해 분석하고 두 가지 상반된 입장을 생성해주세요:
+        prompt = f"""다음 토론 주제와 입장을 보고, 이 입장을 대표하는 짧은 제목을 생성해주세요.
 
-주제: "{topic}"
+토론 주제: {topic}
+핵심 주장: {position}
 
-다음 JSON 형식으로 응답해주세요 (다른 텍스트 없이 JSON만):
-{{
-  "topic": "명확하게 정리된 토론 주제",
-  "stanceA": {{
-    "position": "입장 A의 핵심 주장 (한 문장)",
-    "title": "입장 A의 간단한 라벨 (예: 찬성파, 진보적 관점)"
-  }},
-  "stanceB": {{
-    "position": "입장 B의 핵심 주장 (한 문장)",
-    "title": "입장 B의 간단한 라벨 (예: 반대파, 보수적 관점)"
-  }}
-}}
+요구사항:
+- 2-5 단어로 구성된 짧은 제목
+- 입장의 핵심을 명확하게 표현
+- 예시: "찬성파", "반대파", "중도파", "신중론자", "급진론자", "현실주의자" 등
 
-두 입장은 명확히 대립되어야 하며, 균형잡힌 토론이 가능해야 합니다."""
+다른 설명 없이 제목만 답변해주세요."""
 
         try:
-            # 주제 분석은 Claude 사용 (기본)
-            response_text = self.call_ai(prompt, AVAILABLE_AI_MODELS["claude"])
-            
-            # JSON 추출 (마크다운 코드블록 제거)
-            if response_text.startswith("```"):
-                response_text = response_text.split("```")[1]
-                if response_text.startswith("json"):
-                    response_text = response_text[4:]
-                response_text = response_text.strip()
-            
-            debate_setup = json.loads(response_text)
-            
-            print(f"✅ 토론 주제: {debate_setup['topic']}\n")
-            print(f"🔵 입장 A ({debate_setup['stanceA']['title']})")
-            print(f"   {debate_setup['stanceA']['position']}\n")
-            print(f"🟡 입장 B ({debate_setup['stanceB']['title']})")
-            print(f"   {debate_setup['stanceB']['position']}\n")
-
-            # 각 입장에 대해 AI 선택
-            ai_model_a = self.select_ai_for_stance(debate_setup['stanceA']['title'])
-            ai_model_b = self.select_ai_for_stance(debate_setup['stanceB']['title'])
-
-            # AI 정보 추가
-            debate_setup['stanceA']['ai_model'] = ai_model_a
-            debate_setup['stanceB']['ai_model'] = ai_model_b
-
-            return debate_setup
-            
+            # 첫 번째 사용 가능한 모델로 제목 생성
+            first_model = list(AVAILABLE_AI_MODELS.values())[0]
+            title = self.call_ai(prompt, first_model)
+            # 특수문자 제거 및 정리
+            title = title.strip().strip('"\'')
+            return title[:30]  # 최대 30자로 제한
         except Exception as e:
-            print(f"❌ 오류 발생: {e}")
-            raise
-    
+            print(f"⚠️  제목 생성 실패, 기본값 사용: {e}")
+            return "참여자"
+
+    def create_stances_from_user_input(self, topic: str, num_participants: int) -> Dict:
+        """
+        사용자 입력을 통해 N개의 입장을 생성
+
+        Args:
+            topic: 토론 주제
+            num_participants: 참여자 수
+
+        Returns:
+            토론 설정 정보 (주제, 입장들)
+        """
+        print(f"\n{'='*60}")
+        print(f"📋 토론 주제: {topic}")
+        print(f"{'='*60}\n")
+
+        # 입장 레이블 정의 (이모지와 함께)
+        stance_emojis = ["🔵", "🟡", "🟢", "🔴", "🟣", "🟠", "⚪", "⚫", "🟤", "🔷"]
+
+        debate_setup = {
+            'topic': topic,
+            'stances': []
+        }
+
+        print("👥 각 참여자의 핵심 주장을 입력하고 AI 모델을 선택해주세요.\n")
+        print("💡 역할/제목은 자동으로 생성됩니다.\n")
+
+        # 각 참여자의 정보 입력받기
+        for i in range(num_participants):
+            print(f"{'='*60}")
+            print(f"📍 참여자 {i+1}/{num_participants}")
+            print(f"{'='*60}\n")
+
+            # 참여자 입장 입력
+            while True:
+                position = input("핵심주장 또는 역할: ").strip()
+                if position:
+                    break
+                print("❌ 핵심주장 또는 역할을 입력해주세요.")
+
+            # AI로 제목 생성
+            print(f"\n🤖 제목 생성 중...")
+            title = self.generate_title_for_position(topic, position)
+            print(f"✅ 제목: {title}\n")
+
+            # 입장 정보 저장
+            emoji = stance_emojis[i % len(stance_emojis)]
+            stance = {
+                'title': title,
+                'position': position,
+                'emoji': emoji
+            }
+
+            # 바로 AI 모델 선택
+            ai_model = self.select_ai_for_stance(f"{emoji} {title}")
+            stance['ai_model'] = ai_model
+
+            debate_setup['stances'].append(stance)
+            print(f"✅ 참여자 {i+1} 설정 완료: {emoji} {title} ({ai_model.display_name})\n")
+
+        return debate_setup
+
     def check_consensus_ready(
         self,
         debate_setup: Dict,
-        speaker: str,
+        speaker_idx: int,
         history: List
     ) -> bool:
         """
@@ -268,13 +454,13 @@ class AIDebateSystem:
 
         Args:
             debate_setup: 토론 설정 정보
-            speaker: 'A' 또는 'B'
+            speaker_idx: 참여자 인덱스 (0부터 시작)
             history: 대화 히스토리
 
         Returns:
             True면 최종 합의 준비 완료, False면 토론 계속 필요
         """
-        stance = debate_setup['stanceA'] if speaker == 'A' else debate_setup['stanceB']
+        stance = debate_setup['stances'][speaker_idx]
 
         prompt = f"""지금까지의 토론을 검토해주세요.
 
@@ -284,14 +470,14 @@ class AIDebateSystem:
 지금까지의 토론 내용:
 """
         for msg in history:
-            speaker_label = "나" if msg['speaker'] == speaker else "상대방"
+            speaker_label = "나" if msg['speaker_idx'] == speaker_idx else f"참여자 {msg['speaker_idx']+1}"
             prompt += f"{speaker_label}: {msg['content']}\n\n"
 
         prompt += f"""
 질문: 지금까지의 토론으로 최종 합의안을 도출할 준비가 되었나요?
 
 다음 기준으로 판단해주세요:
-- 양측의 핵심 주장이 충분히 교환되었나?
+- 모든 참여자의 핵심 주장이 충분히 교환되었나?
 - 주요 쟁점에 대한 논의가 이루어졌나?
 - 합의 가능한 지점이 보이는가?
 
@@ -321,7 +507,7 @@ class AIDebateSystem:
     def get_ai_response(
         self,
         debate_setup: Dict,
-        speaker: str,
+        speaker_idx: int,
         history: List,
         instruction: str
     ) -> str:
@@ -330,28 +516,40 @@ class AIDebateSystem:
 
         Args:
             debate_setup: 토론 설정 정보
-            speaker: 'A' 또는 'B'
+            speaker_idx: 참여자 인덱스 (0부터 시작)
             history: 대화 히스토리
             instruction: 현재 라운드 지시사항
 
         Returns:
             AI 응답 텍스트
         """
-        stance = debate_setup['stanceA'] if speaker == 'A' else debate_setup['stanceB']
-        other_stance = debate_setup['stanceB'] if speaker == 'A' else debate_setup['stanceA']
+        stance = debate_setup['stances'][speaker_idx]
+        num_participants = len(debate_setup['stances'])
 
-        prompt = f"""당신은 다음 주제에 대한 토론에 참여하고 있습니다:
+        # 다른 참여자들의 입장 요약
+        other_stances = []
+        for i, s in enumerate(debate_setup['stances']):
+            if i != speaker_idx:
+                other_stances.append(f"{s['title']}: {s['position']}")
+
+        prompt = f"""당신은 다음 주제에 대한 {num_participants}명의 토론에 참여하고 있습니다:
 
 주제: {debate_setup['topic']}
 
-당신의 입장: {stance['position']}
-상대방의 입장: {other_stance['position']}
+당신의 이름과 입장: {stance['title']} - {stance['position']}
+
+다른 참여자들의 입장:
+{chr(10).join(other_stances)}
 
 토론 규칙:
-- 자신의 입장을 명확히 방어하되, 상대방의 타당한 지적은 수용하세요
-- 논리적이고 구체적인 근거를 제시하세요
-- 감정적이거나 인신공격적인 표현은 피하세요
-- 궁극적으로는 합의점을 찾는 것이 목표입니다
+- 자신의 입장을 강력하게 방어하세요
+- 다른 참여자의 주장에 반박할 여지가 있다면 적극적으로 반박하세요
+- 상대의 논리적 오류, 근거 부족, 모순점, 과장, 일반화의 오류 등을 날카롭게 지적하세요
+- 논리적이고 구체적인 반론과 근거를 제시하세요
+- 감정적이거나 인신공격적인 표현은 피하되, 논리적으로는 강하게 반박하세요
+- 쉽게 동의하지 말고, 비판적 사고로 상대 주장을 면밀히 검토하세요
+- 타당한 지적만 수용하고, 반박 가능한 부분은 절대 놓치지 마세요
+- 상대 주장의 약점을 찾아내고, 대안이나 반례를 제시하세요
 
 **답변 길이 가이드:**
 - 충분히 상세하고 구체적으로 작성하세요
@@ -367,7 +565,11 @@ class AIDebateSystem:
         if history:
             prompt += "\n\n지금까지의 토론 내용:\n\n"
             for msg in history:
-                speaker_label = "나" if msg['speaker'] == speaker else "상대방"
+                if msg['speaker_idx'] == speaker_idx:
+                    speaker_label = "나"
+                else:
+                    other_stance = debate_setup['stances'][msg['speaker_idx']]
+                    speaker_label = other_stance['title']
                 prompt += f"{speaker_label}: {msg['content']}\n\n"
 
         try:
@@ -400,49 +602,23 @@ class AIDebateSystem:
                 char_count = len(response)
                 print(f"✅ 확장 완료: {char_count}자")
 
-            # 적정 범위
-            if char_count <= self.char_limit:
-                return response
-
-            # 너무 긴 경우 (1회만 요약 요청)
-            print(f"⚠️  답변이 {char_count}자로 제한({self.char_limit}자)을 초과했습니다. 요약을 요청합니다...")
-
-            summary_prompt = f"""다음 답변이 {char_count}자로 너무 깁니다.
-
-원본 답변:
-{response}
-
-**🚨 필수: 위 내용을 {self.char_limit}자 이내로 요약하세요.**
-- 핵심 논점만 유지하세요
-- 불필요한 수식어나 예시는 제거하세요
-- 반드시 {self.char_limit}자 이내로 작성하세요
-
-요약된 답변만 출력하세요 (다른 설명 없이)."""
-
-            response = self.call_ai(summary_prompt, ai_model)
-
-            # 요약 후 글자 수 표시 (정보 제공용)
-            final_char_count = len(response)
-            if final_char_count > self.char_limit:
-                print(f"ℹ️  요약 후 {final_char_count}자 (제한: {self.char_limit}자)")
-            else:
-                print(f"✅ 요약 완료: {final_char_count}자")
-
             return response
 
         except Exception as e:
             print(f"❌ AI 응답 생성 중 오류: {e}")
             return "응답 생성 중 오류가 발생했습니다."
-    
+
     def conduct_debate(self, debate_setup: Dict):
         """
-        전체 토론 진행
+        전체 토론 진행 (N명 참여)
 
         Args:
             debate_setup: 토론 설정 정보
         """
         # 토론 파일 초기화
         self.initialize_debate_file(debate_setup)
+
+        num_participants = len(debate_setup['stances'])
 
         # 라운드 생성
         rounds = []
@@ -463,14 +639,15 @@ class AIDebateSystem:
             else:
                 round_info = {
                     'name': f'토론 {i}',
-                    'instruction': f'상대방의 주장에 대해 반박하거나 질문하고, 타당한 지적은 인정하며, 합의점을 찾아가세요. ({self.char_limit}자 이내)',
+                    'instruction': f'다른 참여자의 주장에 대해 반박하거나 질문하고, 타당한 지적은 인정하며, 합의점을 찾아가세요. ({self.char_limit}자 이내)',
                 }
 
             rounds.append(round_info)
-        
+
         conversation_history = []
         actual_round_num = 0  # 실제 진행된 라운드 번호
         min_rounds = 2  # 최소 진행 라운드 (초기 주장 + 1회 토론)
+        last_ready_status = None  # 이전 라운드의 합의 준비 상태
 
         for i, round_info in enumerate(rounds):
             actual_round_num = i + 1
@@ -479,57 +656,48 @@ class AIDebateSystem:
             print(f"📍 라운드 {actual_round_num}: {round_info['name']}")
             print(f"{'='*60}\n")
 
-            # 입장 A 응답
-            ai_a = debate_setup['stanceA']['ai_model']
-            print(f"🔵 {debate_setup['stanceA']['title']} ({ai_a.name}) 발언 중...")
-            response_a = self.get_ai_response(
-                debate_setup,
-                'A',
-                conversation_history,
-                round_info['instruction']
-            )
+            # 발언 순서 결정: 합의 확인 후라면 반론 제기자 우선
+            if last_ready_status is not None:
+                # 준비 안 된 참여자(반론 제기자) 먼저, 준비된 참여자 나중에
+                not_ready_indices = [idx for idx, ready in enumerate(last_ready_status) if not ready]
+                ready_indices = [idx for idx, ready in enumerate(last_ready_status) if ready]
+                speaker_order = not_ready_indices + ready_indices
 
-            print(f"\n🔵 {debate_setup['stanceA']['title']} ({ai_a.name}):")
-            print(f"{'-'*60}")
-            print(response_a)
-            print(f"{'-'*60}\n")
+                if not_ready_indices:
+                    print(f"💬 반론 제기자 우선 발언: {len(not_ready_indices)}명\n")
+            else:
+                # 기본 순서 (0부터 순차적)
+                speaker_order = list(range(num_participants))
 
-            conversation_history.append({
-                'speaker': 'A',
-                'content': response_a,
-                'round': actual_round_num
-            })
+            # 모든 참여자가 정해진 순서대로 발언
+            for speaker_idx in speaker_order:
+                stance = debate_setup['stances'][speaker_idx]
+                ai_model = stance['ai_model']
+                emoji = stance['emoji']
 
-            # 실시간으로 파일에 저장
-            self.append_to_debate_file(debate_setup, 'A', response_a, actual_round_num, round_info['name'])
+                print(f"{emoji} {stance['title']} ({ai_model.name}) 발언 중...")
+                response = self.get_ai_response(
+                    debate_setup,
+                    speaker_idx,
+                    conversation_history,
+                    round_info['instruction']
+                )
 
-            time.sleep(1)  # API 호출 간격
+                print(f"\n{emoji} {stance['title']} ({ai_model.name}):")
+                print(f"{'-'*60}")
+                print(response)
+                print(f"{'-'*60}\n")
 
-            # 입장 B 응답
-            ai_b = debate_setup['stanceB']['ai_model']
-            print(f"🟡 {debate_setup['stanceB']['title']} ({ai_b.name}) 발언 중...")
-            response_b = self.get_ai_response(
-                debate_setup,
-                'B',
-                conversation_history,
-                round_info['instruction']
-            )
+                conversation_history.append({
+                    'speaker_idx': speaker_idx,
+                    'content': response,
+                    'round': actual_round_num
+                })
 
-            print(f"\n🟡 {debate_setup['stanceB']['title']} ({ai_b.name}):")
-            print(f"{'-'*60}")
-            print(response_b)
-            print(f"{'-'*60}\n")
+                # 실시간으로 파일에 저장
+                self.append_to_debate_file(debate_setup, speaker_idx, response, actual_round_num, round_info['name'])
 
-            conversation_history.append({
-                'speaker': 'B',
-                'content': response_b,
-                'round': actual_round_num
-            })
-
-            # 실시간으로 파일에 저장
-            self.append_to_debate_file(debate_setup, 'B', response_b, actual_round_num, round_info['name'])
-
-            time.sleep(1)  # API 호출 간격
+                time.sleep(1)  # API 호출 간격
 
             # 최종 합의안 라운드면 종료
             if round_info['name'] == '최종 합의안':
@@ -538,21 +706,24 @@ class AIDebateSystem:
             # 최소 라운드 이후이고, 최대 라운드에 도달하지 않았으면 합의 준비 확인
             if actual_round_num >= min_rounds and i < len(rounds) - 1:
                 print(f"\n{'~'*60}")
-                print("🤝 양측의 합의 준비 상태를 확인합니다...")
+                print("🤝 모든 참여자의 합의 준비 상태를 확인합니다...")
                 print(f"{'~'*60}\n")
 
-                # 양측 합의 준비 확인
-                ready_a = self.check_consensus_ready(debate_setup, 'A', conversation_history)
-                ready_b = self.check_consensus_ready(debate_setup, 'B', conversation_history)
+                # 모든 참여자의 합의 준비 확인
+                ready_status = []
+                for speaker_idx in range(num_participants):
+                    ready = self.check_consensus_ready(debate_setup, speaker_idx, conversation_history)
+                    ready_status.append(ready)
+                    stance = debate_setup['stances'][speaker_idx]
+                    emoji = stance['emoji']
+                    status = "✅ 준비 완료" if ready else "⏳ 토론 계속"
+                    print(f"{emoji} {stance['title']}: {status}")
 
-                status_a = "✅ 준비 완료" if ready_a else "⏳ 토론 계속"
-                status_b = "✅ 준비 완료" if ready_b else "⏳ 토론 계속"
+                print()
 
-                print(f"🔵 {debate_setup['stanceA']['title']}: {status_a}")
-                print(f"🟡 {debate_setup['stanceB']['title']}: {status_b}\n")
-
-                if ready_a and ready_b:
-                    print("🎉 양측 모두 합의 준비가 완료되었습니다!")
+                # 모두 준비 완료된 경우
+                if all(ready_status):
+                    print("🎉 모든 참여자가 합의 준비를 완료했습니다!")
                     print("📝 최종 합의안 도출을 시작합니다.\n")
                     time.sleep(1)
 
@@ -567,50 +738,40 @@ class AIDebateSystem:
                     print(f"📍 라운드 {actual_round_num}: {final_round_info['name']}")
                     print(f"{'='*60}\n")
 
-                    # 최종 합의안 - 입장 A
-                    print(f"🔵 {debate_setup['stanceA']['title']} ({ai_a.name}) 발언 중...")
-                    final_response_a = self.get_ai_response(
-                        debate_setup,
-                        'A',
-                        conversation_history,
-                        final_round_info['instruction']
-                    )
-                    print(f"\n🔵 {debate_setup['stanceA']['title']} ({ai_a.name}):")
-                    print(f"{'-'*60}")
-                    print(final_response_a)
-                    print(f"{'-'*60}\n")
+                    # 모든 참여자가 최종 합의안 제시
+                    for speaker_idx in range(num_participants):
+                        stance = debate_setup['stances'][speaker_idx]
+                        ai_model = stance['ai_model']
+                        emoji = stance['emoji']
 
-                    conversation_history.append({
-                        'speaker': 'A',
-                        'content': final_response_a,
-                        'round': actual_round_num
-                    })
-                    self.append_to_debate_file(debate_setup, 'A', final_response_a, actual_round_num, final_round_info['name'])
-                    time.sleep(1)
+                        print(f"{emoji} {stance['title']} ({ai_model.name}) 발언 중...")
+                        final_response = self.get_ai_response(
+                            debate_setup,
+                            speaker_idx,
+                            conversation_history,
+                            final_round_info['instruction']
+                        )
 
-                    # 최종 합의안 - 입장 B
-                    print(f"🟡 {debate_setup['stanceB']['title']} ({ai_b.name}) 발언 중...")
-                    final_response_b = self.get_ai_response(
-                        debate_setup,
-                        'B',
-                        conversation_history,
-                        final_round_info['instruction']
-                    )
-                    print(f"\n🟡 {debate_setup['stanceB']['title']} ({ai_b.name}):")
-                    print(f"{'-'*60}")
-                    print(final_response_b)
-                    print(f"{'-'*60}\n")
+                        print(f"\n{emoji} {stance['title']} ({ai_model.name}):")
+                        print(f"{'-'*60}")
+                        print(final_response)
+                        print(f"{'-'*60}\n")
 
-                    conversation_history.append({
-                        'speaker': 'B',
-                        'content': final_response_b,
-                        'round': actual_round_num
-                    })
-                    self.append_to_debate_file(debate_setup, 'B', final_response_b, actual_round_num, final_round_info['name'])
+                        conversation_history.append({
+                            'speaker_idx': speaker_idx,
+                            'content': final_response,
+                            'round': actual_round_num
+                        })
+
+                        self.append_to_debate_file(debate_setup, speaker_idx, final_response, actual_round_num, final_round_info['name'])
+                        time.sleep(1)
 
                     break
                 else:
+                    # 다음 라운드를 위해 현재 상태 저장
+                    last_ready_status = ready_status
                     print("➡️  토론을 계속 진행합니다.\n")
+                    print(f"ℹ️  다음 라운드에서는 반론 제기자({sum(1 for r in ready_status if not r)}명)가 먼저 발언합니다.\n")
                     time.sleep(1)
 
         # 토론 결과 저장
@@ -623,7 +784,7 @@ class AIDebateSystem:
         print(f"✅ 토론이 완료되었습니다! (총 {actual_round_num}라운드 진행)")
         print(f"📄 토론 전체 기록: {self.debate_filename}")
         print(f"{'='*60}\n")
-    
+
     def initialize_debate_file(self, debate_setup: Dict):
         """
         토론 시작 시 마크다운 파일 생성 및 헤더 작성
@@ -631,33 +792,34 @@ class AIDebateSystem:
         Args:
             debate_setup: 토론 설정 정보
         """
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        # 타임스탬프 생성 및 저장 (결론 파일과 동일한 값 사용)
+        self.timestamp = time.strftime("%Y%m%d-%H%M%S")
 
         # AI에게 주제를 짧은 영어 키워드로 변환 요청
         print("📝 파일명 키워드 생성 중...")
         self.subject_slug = self.generate_filename_keyword(debate_setup['topic'])
-        print(f"✅ 파일명: {self.subject_slug}-{timestamp}.md\n")
+        print(f"✅ 파일명: {self.subject_slug}-{self.timestamp}.md\n")
 
-        self.debate_filename = f"{self.subject_slug}-{timestamp}.md"
+        self.debate_filename = f"{self.subject_slug}-{self.timestamp}.md"
 
         with open(self.debate_filename, 'w', encoding='utf-8') as f:
             # 마크다운 헤더
             f.write(f"# AI 토론 기록\n\n")
             f.write(f"**생성 일시**: {time.strftime('%Y년 %m월 %d일 %H:%M:%S')}\n\n")
+            f.write(f"**참여자 수**: {len(debate_setup['stances'])}명\n\n")
             f.write(f"---\n\n")
 
             # 토론 주제 및 입장
             f.write(f"## 📋 토론 주제\n\n")
             f.write(f"{debate_setup['topic']}\n\n")
 
-            ai_a = debate_setup['stanceA']['ai_model']
-            ai_b = debate_setup['stanceB']['ai_model']
-
-            f.write(f"### 🔵 입장 A: {debate_setup['stanceA']['title']} ({ai_a.display_name})\n\n")
-            f.write(f"> {debate_setup['stanceA']['position']}\n\n")
-
-            f.write(f"### 🟡 입장 B: {debate_setup['stanceB']['title']} ({ai_b.display_name})\n\n")
-            f.write(f"> {debate_setup['stanceB']['position']}\n\n")
+            # 모든 참여자의 입장 출력
+            f.write(f"## 👥 참여자 입장\n\n")
+            for i, stance in enumerate(debate_setup['stances']):
+                ai_model = stance['ai_model']
+                emoji = stance['emoji']
+                f.write(f"### {emoji} 참여자 {i+1}: {stance['title']} ({ai_model.display_name})\n\n")
+                f.write(f"> {stance['position']}\n\n")
 
             f.write(f"---\n\n")
 
@@ -666,13 +828,13 @@ class AIDebateSystem:
 
         print(f"💾 토론 기록 파일 생성: {self.debate_filename}\n")
 
-    def append_to_debate_file(self, debate_setup: Dict, speaker: str, content: str, round_num: int, round_name: str):
+    def append_to_debate_file(self, debate_setup: Dict, speaker_idx: int, content: str, round_num: int, round_name: str):
         """
         토론 내용을 실시간으로 파일에 추가
 
         Args:
             debate_setup: 토론 설정 정보
-            speaker: 'A' 또는 'B'
+            speaker_idx: 참여자 인덱스 (0부터 시작)
             content: 발언 내용
             round_num: 라운드 번호
             round_name: 라운드 이름
@@ -683,12 +845,63 @@ class AIDebateSystem:
                 self.current_round = round_num
                 f.write(f"### 라운드 {round_num}: {round_name}\n\n")
 
-            stance = debate_setup['stanceA'] if speaker == 'A' else debate_setup['stanceB']
-            icon = "🔵" if speaker == 'A' else "🟡"
+            stance = debate_setup['stances'][speaker_idx]
+            emoji = stance['emoji']
             ai_model = stance['ai_model']
 
-            f.write(f"#### {icon} {stance['title']} ({ai_model.name})\n\n")
+            f.write(f"#### {emoji} {stance['title']} ({ai_model.name})\n\n")
             f.write(f"{content}\n\n")
+
+    def synthesize_final_conclusion(self, debate_setup: Dict, final_proposals: List[Dict]) -> str:
+        """
+        모든 참여자의 최종 합의안을 종합하여 통합된 결론 생성
+
+        Args:
+            debate_setup: 토론 설정 정보
+            final_proposals: 최종 합의안 목록
+
+        Returns:
+            통합된 최종 결론
+        """
+        # 각 참여자의 합의안 정리
+        proposals_text = ""
+        for msg in final_proposals:
+            speaker_idx = msg['speaker_idx']
+            stance = debate_setup['stances'][speaker_idx]
+            proposals_text += f"\n[{stance['title']}의 제안]\n{msg['content']}\n"
+
+        prompt = f"""다음은 "{debate_setup['topic']}" 주제에 대한 {len(debate_setup['stances'])}명의 참여자들이 토론 후 제시한 최종 합의안입니다.
+
+{proposals_text}
+
+**당신의 역할:**
+위의 모든 합의안을 종합하여 하나의 통합된 최종 결론을 작성해주세요.
+
+**작성 요구사항:**
+1. 모든 참여자의 핵심 제안을 균형있게 반영
+2. 공통된 합의점을 명확히 제시
+3. 구체적이고 실행 가능한 결론으로 작성
+4. 각 참여자의 우려사항이나 조건을 적절히 포함
+5. 체계적이고 논리적인 구조로 정리
+6. 1000자 이내로 간결하게 작성
+
+**형식:**
+- 마크다운 형식 사용
+- 섹션 구분 (## 헤더 사용)
+- 필요시 불릿 포인트나 번호 목록 활용
+
+통합된 최종 결론만 출력하세요 (다른 설명 없이)."""
+
+        try:
+            # 첫 번째 사용 가능한 모델로 통합 결론 생성
+            first_model = list(AVAILABLE_AI_MODELS.values())[0]
+            print("🤖 최종 합의안 종합 중...")
+            unified_conclusion = self.call_ai(prompt, first_model)
+            print("✅ 통합 결론 생성 완료\n")
+            return unified_conclusion
+        except Exception as e:
+            print(f"⚠️  통합 결론 생성 실패: {e}")
+            return "통합 결론 생성 중 오류가 발생했습니다."
 
     def save_conclusion_file(self, debate_setup: Dict, history: List, subject_slug: str, final_round_num: int):
         """
@@ -707,13 +920,17 @@ class AIDebateSystem:
             print("⚠️  최종 합의안이 없어 conclusion 파일을 생성하지 않습니다.")
             return
 
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        conclusion_filename = f"{subject_slug}-conclusion-{timestamp}.md"
+        # 통합된 최종 결론 생성
+        unified_conclusion = self.synthesize_final_conclusion(debate_setup, final_round)
+
+        # 토론 파일과 동일한 타임스탬프 사용
+        conclusion_filename = f"{subject_slug}-conclusion-{self.timestamp}.md"
 
         with open(conclusion_filename, 'w', encoding='utf-8') as f:
             # 마크다운 헤더
             f.write(f"# 토론 합의안\n\n")
             f.write(f"**생성 일시**: {time.strftime('%Y년 %m월 %d일 %H:%M:%S')}\n\n")
+            f.write(f"**참여자 수**: {len(debate_setup['stances'])}명\n\n")
             f.write(f"---\n\n")
 
             # 토론 주제
@@ -722,27 +939,32 @@ class AIDebateSystem:
 
             f.write(f"---\n\n")
 
-            # 양측 입장
-            ai_a = debate_setup['stanceA']['ai_model']
-            ai_b = debate_setup['stanceB']['ai_model']
-
-            f.write(f"## 🤝 양측 입장\n\n")
-            f.write(f"### 🔵 {debate_setup['stanceA']['title']} ({ai_a.display_name})\n\n")
-            f.write(f"> {debate_setup['stanceA']['position']}\n\n")
-            f.write(f"### 🟡 {debate_setup['stanceB']['title']} ({ai_b.display_name})\n\n")
-            f.write(f"> {debate_setup['stanceB']['position']}\n\n")
+            # 모든 참여자 입장
+            f.write(f"## 👥 참여자 입장\n\n")
+            for i, stance in enumerate(debate_setup['stances']):
+                ai_model = stance['ai_model']
+                emoji = stance['emoji']
+                f.write(f"### {emoji} 참여자 {i+1}: {stance['title']} ({ai_model.display_name})\n\n")
+                f.write(f"> {stance['position']}\n\n")
 
             f.write(f"---\n\n")
 
-            # 최종 합의안
-            f.write(f"## ✅ 최종 합의안\n\n")
+            # 통합된 최종 결론
+            f.write(f"## 📝 통합 최종 결론\n\n")
+            f.write(f"{unified_conclusion}\n\n")
+
+            f.write(f"---\n\n")
+
+            # 개별 참여자 합의안 (참고용)
+            f.write(f"## 📌 개별 참여자 합의안 (참고)\n\n")
 
             for msg in final_round:
-                stance = debate_setup['stanceA'] if msg['speaker'] == 'A' else debate_setup['stanceB']
-                icon = "🔵" if msg['speaker'] == 'A' else "🟡"
+                speaker_idx = msg['speaker_idx']
+                stance = debate_setup['stances'][speaker_idx]
+                emoji = stance['emoji']
                 ai_model = stance['ai_model']
 
-                f.write(f"### {icon} {stance['title']} ({ai_model.name})의 제안\n\n")
+                f.write(f"### {emoji} {stance['title']} ({ai_model.name})의 제안\n\n")
                 f.write(f"{msg['content']}\n\n")
 
         print(f"📄 합의안 파일 저장: {conclusion_filename}")
@@ -757,9 +979,24 @@ def main():
     print("지원 모델: Claude, OpenAI, Gemini, Grok\n")
 
     try:
+        # AI 모델 가용성 확인 및 초기화
+        initialize_available_models()
+
         # 설정값 입력
         print("⚙️  토론 설정")
         print("-" * 60)
+
+        # 참여자 수 입력
+        num_participants_input = input("토론 참여자 수 [기본: 2, 최소: 2, 최대: 10]: ").strip()
+        num_participants = int(num_participants_input) if num_participants_input else 2
+
+        # 참여자 수 유효성 검사
+        if num_participants < 2:
+            print("⚠️  참여자 수는 최소 2명 이상이어야 합니다. 기본값(2) 사용")
+            num_participants = 2
+        elif num_participants > 10:
+            print("⚠️  참여자 수는 최대 10명까지 가능합니다. 10명으로 설정")
+            num_participants = 10
 
         # 글자 수 제한 입력
         char_limit_input = input("답변 글자 수 제한 [기본: 500]: ").strip()
@@ -774,8 +1011,8 @@ def main():
             print("⚠️  최대 라운드 수는 최소 2 이상이어야 합니다. 기본값(5) 사용")
             num_rounds = 5
 
-        print(f"\n✅ 설정 완료: 글자 수 제한={char_limit}자, 최대 라운드={num_rounds}회")
-        print("💡 양측이 합의하면 최대 라운드 전에 조기 종료될 수 있습니다.\n")
+        print(f"\n✅ 설정 완료: 참여자={num_participants}명, 글자 수 제한={char_limit}자, 최대 라운드={num_rounds}회")
+        print("💡 모든 참여자가 합의하면 최대 라운드 전에 조기 종료될 수 있습니다.\n")
         print()
 
         # 시스템 초기화
@@ -792,9 +1029,9 @@ def main():
             sys.exit(1)
 
         # 토론 진행
-        debate_setup = system.analyze_topic_and_create_stances(topic)
+        debate_setup = system.create_stances_from_user_input(topic, num_participants)
         system.conduct_debate(debate_setup)
-        
+
     except KeyboardInterrupt:
         print("\n\n⚠️  사용자가 토론을 중단했습니다.")
         sys.exit(0)
