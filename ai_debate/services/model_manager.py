@@ -38,6 +38,7 @@ class ModelManager:
         Returns:
             사용 가능하면 True, 아니면 False
         """
+        # 1단계: CLI 설치 확인 (빠른 체크)
         test_cmd = model.test_command or model.command[:1] + ["--version"]
 
         try:
@@ -48,13 +49,55 @@ class ModelManager:
                 timeout=MODEL_CHECK_TIMEOUT,
                 encoding='utf-8'
             )
-            # 명령어가 실행되고 심각한 오류가 없으면 사용 가능
-            return result.returncode in [0, 1]
+            # CLI가 없거나 심각한 오류면 즉시 False
+            if result.returncode not in [0, 1]:
+                return False
         except FileNotFoundError:
             return False
         except subprocess.TimeoutExpired:
             # 타임아웃은 실행은 되지만 응답이 느린 경우
-            return True
+            pass
+        except Exception:
+            return False
+
+        # 2단계: 실제 API 호출 테스트 (인증/크레딧 확인)
+        try:
+            test_prompt = "hi"
+            result = subprocess.run(
+                model.command + [test_prompt],
+                capture_output=True,
+                text=True,
+                timeout=MODEL_CHECK_TIMEOUT * 3,  # API 호출은 더 오래 걸릴 수 있음
+                encoding='utf-8'
+            )
+
+            # stdout과 stderr 모두에서 에러 확인
+            output = (result.stdout + result.stderr).lower()
+            error_keywords = [
+                '403',
+                '401',
+                'unauthorized',
+                'authentication',
+                'credit',
+                'quota',
+                'api key',
+                'billing',
+                'payment',
+                'api error',
+                "doesn't have any credits",
+                'purchase credits'
+            ]
+
+            # 에러 키워드가 있으면 사용 불가능
+            if any(keyword in output for keyword in error_keywords):
+                return False
+
+            # returncode 0이면 성공
+            return result.returncode == 0
+
+        except subprocess.TimeoutExpired:
+            # API 호출 타임아웃은 실패로 간주
+            return False
         except Exception:
             return False
 
